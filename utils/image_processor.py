@@ -1,4 +1,4 @@
-﻿import io
+import io
 from typing import Optional, Tuple, Union
 
 import numpy as np
@@ -28,7 +28,7 @@ def load_image(source: ImageSource) -> Image.Image:
 
 
 def normalize_image(image: Image.Image) -> np.ndarray:
-    """Convert a PIL image to a normalized float32 numpy array."""
+    """Convert a PIL image to a float32 numpy array in [0, 255] range."""
     image_array = np.asarray(image, dtype=np.float32)
 
     if image_array.ndim == 2:
@@ -37,7 +37,32 @@ def normalize_image(image: Image.Image) -> np.ndarray:
     if image_array.shape[-1] == 4:
         image_array = image_array[..., :3]
 
-    return image_array / 255.0
+    return image_array
+
+
+def is_likely_plant_image(image: Image.Image, min_plant_pixel_pct: float = 10.0) -> bool:
+    """Check if the image contains a significant amount of plant-like colors (green, yellow, brown, orange, red)."""
+    try:
+        hsv_img = image.convert('HSV')
+        hsv_array = np.array(hsv_img)
+        h = hsv_array[:, :, 0]
+        s = hsv_array[:, :, 1]
+        v = hsv_array[:, :, 2]
+
+        # Scale H to degrees [0, 360]
+        h_deg = (h.astype(np.float32) * 360.0) / 255.0
+
+        # Plant colors: green, yellow, brown, orange, red
+        is_green = (h_deg >= 35) & (h_deg <= 160) & (s > 20) & (v > 20)
+        is_yellow_brown = (h_deg >= 10) & (h_deg < 35) & (s > 25) & (v > 20)
+        is_red_dark_brown = ((h_deg >= 340) | (h_deg < 10)) & (s > 25) & (v > 20)
+
+        plant_pixels = is_green | is_yellow_brown | is_red_dark_brown
+        plant_pct = (np.sum(plant_pixels) / plant_pixels.size) * 100.0
+
+        return plant_pct >= min_plant_pixel_pct
+    except Exception:
+        return True  # Fallback to True on error
 
 
 def resize_image(
@@ -65,7 +90,7 @@ def preprocess_image(
 ) -> Optional[np.ndarray]:
     """Load and preprocess an image for the plant disease model.
 
-    Returns a numpy array of shape (1, height, width, 3) with values in [0, 1].
+    Returns a numpy array of shape (1, height, width, 3) with values in [0, 255].
     """
     try:
         image = load_image(source)

@@ -1,4 +1,4 @@
-﻿import json
+import json
 import logging
 import os
 import sys
@@ -14,7 +14,7 @@ import numpy as np
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-from utils.image_processor import preprocess_image
+from utils.image_processor import preprocess_image, is_likely_plant_image
 
 load_dotenv(dotenv_path=os.path.join(BASE_DIR, '.env'))
 
@@ -99,20 +99,56 @@ def predict_disease():
     if not image_bytes:
         raise BadRequest('Uploaded image file is empty')
 
+    # --- OOD Guard: reject non-plant images before running the model ---
+    try:
+        import io as _io
+        from PIL import Image as _Image
+        _pil = _Image.open(_io.BytesIO(image_bytes))
+        _pil = _pil.convert('RGB')
+        if not is_likely_plant_image(_pil):
+            return jsonify({
+                'success': False,
+                'message': 'No plant or leaf detected in the uploaded image. '
+                           'Please upload a clear photo of a plant leaf.'
+            }), 422
+    except Exception as _e:
+        logger.warning('Plant image pre-check failed (proceeding): %s', _e)
+    # --- End OOD Guard ---
+
     processed_image = preprocess_image(image_bytes)
     if processed_image is None:
         raise BadRequest('Failed to preprocess the uploaded image')
 
     predictions = model.predict(processed_image, verbose=0)
-    logits = np.asarray(predictions[0], dtype=np.float32)
-    class_idx = int(np.argmax(logits))
-    confidence = float(logits[class_idx])
+    raw_output = np.asarray(predictions[0], dtype=np.float32).reshape(-1)
+
+    if raw_output.size == 0:
+        return jsonify({'success': False, 'message': 'Model returned no predictions'}), 500
+
+    if np.all(raw_output >= 0) and np.isclose(raw_output.sum(), 1.0, atol=1e-3):
+        probabilities = raw_output
+    else:
+        shifted = raw_output - np.max(raw_output)
+        exp_values = np.exp(shifted)
+        probabilities = exp_values / np.sum(exp_values)
+
+    class_idx = int(np.argmax(probabilities))
+    confidence = float(np.clip(probabilities[class_idx], 0.0, 1.0))
     disease_name = labels[class_idx] if class_idx < len(labels) else 'Unknown'
+
+    # --- Confidence threshold: treat very low-confidence results as undetected ---
+    MIN_CONFIDENCE = float(os.getenv('MIN_PREDICTION_CONFIDENCE', '0.50'))
+    if confidence < MIN_CONFIDENCE:
+        return jsonify({
+            'success': False,
+            'message': 'Could not confidently identify the plant disease. '
+                       'Please upload a clearer or closer photo of the affected leaf.'
+        }), 422
 
     return jsonify({
         'success': True,
         'disease': disease_name,
-        'confidence': round(confidence * 100, 2)
+        'confidence': round(confidence, 4)
     })
 
 
